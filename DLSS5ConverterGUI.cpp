@@ -152,32 +152,49 @@ bool ConvertFromBmp(const std::string& inputBmp, const std::string& output) {
     return RunCommand(cmd) == 0;
 }
 
+// Reads either a 24-bit (no alpha) or 32-bit (alpha ignored -- we always want opaque) uncompressed
+// BMP, scanning the header for which one it actually is rather than assuming one. ffmpeg writes
+// 24-bit for an opaque source and 32-bit when the source carries an alpha channel (any screenshot
+// PNG, for instance) -- both are legitimate, and forcing ffmpeg's own output to 24-bit elsewhere
+// in this file does not cover a BMP the user (or something else) handed us directly, unconverted.
 bool LoadBmpAsRgba(const char* path, std::vector<uint8_t>& outPixels, UINT& outW, UINT& outH) {
     FILE* f = fopen(path, "rb");
     if (!f) { printf("%s: could not open %s\n", kName, path); return false; }
     BITMAPFILEHEADER fh;
     BITMAPINFOHEADER ih;
-    if (fread(&fh, sizeof(fh), 1, f) != 1 || fread(&ih, sizeof(ih), 1, f) != 1 ||
-        fh.bfType != 0x4D42 || ih.biBitCount != 24 || ih.biCompression != BI_RGB) {
-        printf("%s: %s is not an uncompressed 24-bit BMP\n", kName, path);
+    if (fread(&fh, sizeof(fh), 1, f) != 1 || fread(&ih, sizeof(ih), 1, f) != 1 || fh.bfType != 0x4D42) {
+        printf("%s: %s is not a BMP\n", kName, path);
         fclose(f);
         return false;
     }
+    const UINT bpp = ih.biBitCount;
+    if ((bpp != 24 && bpp != 32) || ih.biCompression != BI_RGB) {
+        printf("%s: %s is a %u-bit BMP (compression %u) -- only uncompressed 24-bit or 32-bit is "
+               "supported\n", kName, path, bpp, ih.biCompression);
+        fclose(f);
+        return false;
+    }
+    const UINT bytesPerPixel = bpp / 8;
     const UINT w = (UINT)ih.biWidth;
     const UINT h = (UINT)(ih.biHeight >= 0 ? ih.biHeight : -ih.biHeight);
     const bool bottomUp = ih.biHeight > 0;
-    const UINT srcRowBytes = (w * 3 + 3) & ~3u;
+    const UINT srcRowBytes = (w * bytesPerPixel + 3) & ~3u;
     std::vector<uint8_t> row(srcRowBytes);
     outPixels.assign((size_t)w * h * 4, 255);
     fseek(f, fh.bfOffBits, SEEK_SET);
     for (UINT y = 0; y < h; y++) {
-        if (fread(row.data(), 1, srcRowBytes, f) != srcRowBytes) { fclose(f); return false; }
+        if (fread(row.data(), 1, srcRowBytes, f) != srcRowBytes) {
+            printf("%s: %s: short read at row %u\n", kName, path, y);
+            fclose(f);
+            return false;
+        }
         const UINT destY = bottomUp ? (h - 1 - y) : y;
         uint8_t* dst = &outPixels[(size_t)destY * w * 4];
         for (UINT x = 0; x < w; x++) {
-            dst[x * 4 + 0] = row[x * 3 + 2];
-            dst[x * 4 + 1] = row[x * 3 + 1];
-            dst[x * 4 + 2] = row[x * 3 + 0];
+            const uint8_t* src = &row[x * bytesPerPixel];
+            dst[x * 4 + 0] = src[2];
+            dst[x * 4 + 1] = src[1];
+            dst[x * 4 + 2] = src[0];
             dst[x * 4 + 3] = 255;
         }
     }

@@ -133,6 +133,16 @@ keypress itself; you don't need to do anything.
 
 ## Changelog
 
+### v1.0.2
+
+- **The BMP loader now detects 24-bit vs. 32-bit itself** instead of relying
+  solely on forcing `ffmpeg`'s output format. v1.0.1 fixed the common case
+  (this tool's own `ffmpeg` conversion), but a BMP handed to it directly
+  (`.bmp` input skips that conversion step entirely) could still be 32-bit
+  and get rejected. The loader now reads the header's actual bit depth and
+  handles either correctly, so this can't happen regardless of where the BMP
+  came from.
+
 ### v1.0.1
 
 - **Fixed: converting a screenshot (or any PNG/image with an alpha channel)
