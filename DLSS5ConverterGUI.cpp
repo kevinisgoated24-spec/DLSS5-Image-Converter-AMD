@@ -22,6 +22,7 @@
 #include <gdiplus.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -58,13 +59,16 @@ enum {
     IdLog = 1006,
     IdStatus = 1007,
     IdProgress = 1008,
+    IdEncoderCombo = 1009,
 };
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_DONE = WM_APP + 2;
+constexpr UINT_PTR IdDoneAnimTimer = 1;
 
 HWND g_hwnd = nullptr;
 HWND g_editLog = nullptr, g_editPath = nullptr, g_lblIntensity = nullptr, g_lblStatus = nullptr;
 HWND g_btnChoose = nullptr, g_btnConvert = nullptr, g_slider = nullptr, g_progress = nullptr;
+HWND g_comboEncoder = nullptr;
 std::string g_inputPath;
 // The add-on itself always looks for dlss5-neural.ini/.log next to its own DLL (i.e. next to
 // this exe), via GetModuleFileNameW on its own module handle -- not relative to whatever the
@@ -75,22 +79,42 @@ std::string g_inputPath;
 // this instead of a bare relative filename.
 std::string g_exeDir;
 float g_intensity = 0.08f;
+// 0 = libx264 balanced (default), 1 = libx264 fast, 2 = h264_amf (AMD GPU hardware encode).
+// Only used for video conversions -- ConvertPhoto never re-encodes anything.
+int g_encoderIndex = 0;
+// Probed once at startup (see CheckAmfEncoder). If the selected encoder is the AMD hardware one
+// and this is false, ProcessVideo logs a warning and falls back to the fast CPU preset instead of
+// just failing partway through the re-encode step.
+bool g_amfAvailable = false;
 bool g_busy = false;
 Gdiplus::Bitmap* g_preview = nullptr;
 CRITICAL_SECTION g_previewLock;
 
 // ---------------------------------------------------------------------------------------------
+// "Done" reveal animation -- a diagonal wipe (with a small diamond riding the seam) that sweeps
+// the preview card left-to-right when a conversion finishes, plus a matching fill bar under the
+// status line so video conversions (no preview image to reveal) still get a visible payoff.
+// Driven by a plain WM_TIMER rather than anything fancier since one ~0.6s sweep at a time is all
+// this ever needs to do.
+// ---------------------------------------------------------------------------------------------
+bool g_doneAnim = false;
+DWORD g_doneAnimStart = 0;
+constexpr DWORD kDoneAnimMs = 650;
+constexpr float kWipeAngleDeg = 12.0f;
+const RECT kDoneBarRect = { 20, 390, 680, 398 }; // same slot g_progress's marquee bar sits in
+
+// ---------------------------------------------------------------------------------------------
 // Theme: a light, card-based layout instead of a bare gray dialog. Cards are drawn as rounded
 // rectangles directly onto the window background in WM_PAINT; the actual controls (still normal
 // Win32 child windows -- nothing here is owner-drawn except the Convert button) sit visually
-// inside them. Coordinates are all client-area pixels for a fixed 700x820 window.
+// inside them. Coordinates are all client-area pixels for a fixed 700x876 window.
 // ---------------------------------------------------------------------------------------------
 
-constexpr int kWinW = 700, kWinH = 820;
+constexpr int kWinW = 700, kWinH = 876;
 const RECT kCardInput    = { 20,  86, 680, 174 };
-const RECT kCardSettings = { 20, 188, 680, 268 };
-const RECT kCardLog      = { 20, 358, 680, 462 };
-const RECT kCardPreview  = { 20, 476, 680, 796 };
+const RECT kCardSettings = { 20, 188, 680, 324 };
+const RECT kCardLog      = { 20, 414, 680, 518 };
+const RECT kCardPreview  = { 20, 532, 680, 852 };
 RECT g_previewRect = { kCardPreview.left + 10, kCardPreview.top + 10,
                         kCardPreview.right - 10, kCardPreview.bottom - 10 };
 
@@ -244,6 +268,13 @@ bool CheckFfmpegOnPath() {
     return RunCommand("where ffmpeg >nul 2>nul") == 0 && RunCommand("where ffprobe >nul 2>nul") == 0;
 }
 
+// Whether this ffmpeg build has AMD's hardware H.264 encoder. Only meaningful once ffmpeg itself
+// is confirmed on PATH -- callers check that first. A fresh or stripped-down driver install can
+// be missing AMF even on a real AMD GPU, so this is a runtime probe rather than an assumption.
+bool CheckAmfEncoder() {
+    return RunCommand("ffmpeg -hide_banner -encoders 2>nul | findstr /I \"h264_amf\" >nul") == 0;
+}
+
 // Downloads gyan.dev's "essentials" static ffmpeg build into <exeDir>\ffmpeg-bin. Writes the
 // download/extract logic to a temp .ps1 file and runs that, rather than trying to compose it as
 // one inline command-line string -- passing a multi-step script through two more layers of shell
@@ -308,6 +339,12 @@ bool CheckDependencies() {
             printf("%s: ffmpeg is required and was not found. Install it yourself and put it on "
                    "PATH, or restart this app and say yes.\n", kName);
         }
+    }
+
+    g_amfAvailable = ffmpegOk && CheckAmfEncoder();
+    if (ffmpegOk && !g_amfAvailable) {
+        printf("%s: this ffmpeg build has no h264_amf (AMD hardware) encoder -- the GPU encoder "
+               "option in Settings will fall back to CPU if selected.\n", kName);
     }
 
     std::vector<std::string> missing;
@@ -747,7 +784,25 @@ bool ProcessImage(const std::string& inputPath, const std::string& outputPath, f
     return true;
 }
 
-bool ProcessVideo(const std::string& inputPath, const std::string& outputPath, float intensity) {
+// Builds the "-c:v ..." tail of the re-encode command for one of the three Settings-card choices.
+// Falls back to the fast CPU preset (rather than the slower "balanced" one, since a user picking
+// the GPU option is presumably prioritizing speed) if AMD hardware was requested but this ffmpeg
+// build doesn't actually have h264_amf -- see CheckAmfEncoder.
+std::string EncoderFlags(int encoderIndex) {
+    if (encoderIndex == 2 && !g_amfAvailable) {
+        printf("%s: GPU (AMD hardware) encoder was selected but this ffmpeg build doesn't have "
+               "h264_amf -- falling back to CPU fast preset.\n", kName);
+        encoderIndex = 1;
+    }
+    switch (encoderIndex) {
+    case 1:  return "-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p";
+    case 2:  return "-c:v h264_amf -quality quality -rc cqp -qp_i 18 -qp_p 20 -pix_fmt yuv420p";
+    default: return "-c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p";
+    }
+}
+
+bool ProcessVideo(const std::string& inputPath, const std::string& outputPath, float intensity,
+                   int encoderIndex) {
     std::string stem = StemOf(outputPath);
     std::string frameDir = stem + "_frames";
     std::string outFrameDir = stem + "_frames_out";
@@ -843,7 +898,7 @@ bool ProcessVideo(const std::string& inputPath, const std::string& outputPath, f
     std::string encodeCmd = "ffmpeg -y -loglevel error -framerate " + fps + " -i \"" + outFrameDir +
                              "\\frame_%06d.bmp\"";
     if (haveAudio) encodeCmd += " -i \"" + audioPath + "\" -map 0:v -map 1:a -c:a aac -shortest";
-    encodeCmd += " -c:v libx264 -pix_fmt yuv420p \"" + outputPath + "\"";
+    encodeCmd += " " + EncoderFlags(encoderIndex) + " \"" + outputPath + "\"";
     if (RunCommand(encodeCmd) != 0) { printf("%s: ffmpeg failed to re-encode the output video\n", kName); return false; }
     printf("%s: wrote %s\n", kName, outputPath.c_str());
     return true;
@@ -869,7 +924,7 @@ DWORD WINAPI ConvertThread(LPVOID param) {
 
     remove((g_exeDir + "dlss5-neural.log").c_str());
     SeedAddonSettings(g_intensity);
-    bool ok = isVideo ? ProcessVideo(inputPath, outputPath, g_intensity)
+    bool ok = isVideo ? ProcessVideo(inputPath, outputPath, g_intensity, g_encoderIndex)
                        : ProcessImage(inputPath, outputPath, g_intensity);
 
     result->ok = ok;
@@ -887,6 +942,7 @@ void SetStatus(const char* text) { SetWindowTextA(g_lblStatus, text); }
 
 void StartConversion() {
     if (g_busy || g_inputPath.empty()) return;
+    if (g_doneAnim) { g_doneAnim = false; KillTimer(g_hwnd, IdDoneAnimTimer); }
     g_busy = true;
     EnableWindow(g_btnConvert, FALSE);
     EnableWindow(g_btnChoose, FALSE);
@@ -948,12 +1004,29 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                              kCardSettings.right - kCardSettings.left - 372 - 16, 20, SS_LEFT,
                              IdIntensityLabel, g_fontBody);
 
+        // Video encoder -- only touches video conversions (ConvertPhoto never re-encodes), but
+        // lives in the shared Settings card since it is a conversion-wide preference, not
+        // something that only makes sense once a video is already loaded.
+        mk("STATIC", "Video encoder", kCardSettings.left + 16, kCardSettings.top + 70, 200, 20,
+           SS_LEFT, 0, g_fontBold);
+        g_comboEncoder = CreateWindowExA(0, "COMBOBOX", "",
+                                          WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                          kCardSettings.left + 16, kCardSettings.top + 94, 400, 200,
+                                          hwnd, (HMENU)(INT_PTR)IdEncoderCombo,
+                                          GetModuleHandle(nullptr), nullptr);
+        SendMessageA(g_comboEncoder, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+        SendMessageA(g_comboEncoder, CB_ADDSTRING, 0, (LPARAM)"CPU - balanced (x264, best quality)");
+        SendMessageA(g_comboEncoder, CB_ADDSTRING, 0, (LPARAM)"CPU - fast (x264, larger file)");
+        SendMessageA(g_comboEncoder, CB_ADDSTRING, 0,
+                     (LPARAM)"GPU - AMD hardware (h264_amf, lightest on CPU/multitasking)");
+        SendMessageA(g_comboEncoder, CB_SETCURSEL, g_encoderIndex, 0);
+
         // Convert + status + progress (sit directly on the window background, between cards)
-        g_btnConvert = mk("BUTTON", "Convert", 20, 284, 160, 42,
+        g_btnConvert = mk("BUTTON", "Convert", 20, 340, 160, 42,
                            BS_OWNERDRAW | BS_NOTIFY, IdConvert, g_fontButton);
         EnableWindow(g_btnConvert, FALSE);
-        g_lblStatus = mk("STATIC", "Ready.", 196, 296, 464, 22, SS_LEFT, IdStatus, g_fontBody);
-        g_progress = CreateWindowExA(0, PROGRESS_CLASSA, "", WS_CHILD | PBS_MARQUEE, 20, 334, 660,
+        g_lblStatus = mk("STATIC", "Ready.", 196, 352, 464, 22, SS_LEFT, IdStatus, g_fontBody);
+        g_progress = CreateWindowExA(0, PROGRESS_CLASSA, "", WS_CHILD | PBS_MARQUEE, 20, 390, 660,
                                       8, hwnd, (HMENU)(INT_PTR)IdProgress, GetModuleHandle(nullptr),
                                       nullptr);
 
@@ -1022,6 +1095,8 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (GetOpenFileNameA(&ofn)) SetInputPath(path);
         } else if (LOWORD(wp) == IdConvert && HIWORD(wp) == BN_CLICKED) {
             StartConversion();
+        } else if (LOWORD(wp) == IdEncoderCombo && HIWORD(wp) == CBN_SELCHANGE) {
+            g_encoderIndex = (int)SendMessageA(g_comboEncoder, CB_GETCURSEL, 0, 0);
         }
         return 0;
     case WM_DRAWITEM: {
@@ -1076,11 +1151,27 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             char buf[MAX_PATH + 32];
             snprintf(buf, sizeof(buf), "Done -- wrote %s", result->outputPath);
             SetStatus(buf);
+            // SetPreview() runs first so the image is already loaded and ready to be revealed the
+            // instant the wipe animation starts painting, rather than popping in mid-sweep.
             if (!result->isVideo) SetPreview(result->outputPath);
+            g_doneAnim = true;
+            g_doneAnimStart = GetTickCount();
+            SetTimer(hwnd, IdDoneAnimTimer, 15, nullptr);
         } else {
             SetStatus("Failed -- see the log above.");
         }
+        InvalidateRect(hwnd, nullptr, TRUE);
         delete result;
+        return 0;
+    }
+    case WM_TIMER: {
+        if (wp == IdDoneAnimTimer) {
+            if (GetTickCount() - g_doneAnimStart >= kDoneAnimMs) {
+                g_doneAnim = false;
+                KillTimer(hwnd, IdDoneAnimTimer);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         return 0;
     }
     case WM_ERASEBKGND:
@@ -1132,6 +1223,24 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.DrawString(L"Neural rendering for AMD GPUs, offline", -1, &subFont,
                      Gdiplus::PointF(20, 52), &mutedBrush);
 
+        // Done animation, part 1: a fill bar in the slot the "working..." marquee bar just
+        // vacated (that control is hidden by the time this fires), so a video conversion -- which
+        // has no preview image to reveal -- still gets a visible payoff moment.
+        float doneP = 0.0f;
+        if (g_doneAnim) {
+            float t = std::min(1.0f, (GetTickCount() - g_doneAnimStart) / (float)kDoneAnimMs);
+            doneP = 1.0f - powf(1.0f - t, 3.0f); // ease-out cubic: quick start, soft landing
+            float bl = (float)kDoneBarRect.left, bt = (float)kDoneBarRect.top;
+            float bw = (float)(kDoneBarRect.right - kDoneBarRect.left);
+            float bh = (float)(kDoneBarRect.bottom - kDoneBarRect.top);
+            Gdiplus::SolidBrush track(Gdiplus::Color(255, GetRValue(kColCardEdge),
+                                                      GetGValue(kColCardEdge), GetBValue(kColCardEdge)));
+            g.FillRectangle(&track, bl, bt, bw, bh);
+            Gdiplus::SolidBrush fill(Gdiplus::Color(255, GetRValue(kColAccent), GetGValue(kColAccent),
+                                                     GetBValue(kColAccent)));
+            g.FillRectangle(&fill, bl, bt, bw * doneP, bh);
+        }
+
         // Preview card's interior
         EnterCriticalSection(&g_previewLock);
         if (g_preview) {
@@ -1139,7 +1248,46 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             double scale = std::min((double)pw / g_preview->GetWidth(), (double)ph / g_preview->GetHeight());
             int dw = (int)(g_preview->GetWidth() * scale), dh = (int)(g_preview->GetHeight() * scale);
             int dx = g_previewRect.left + (pw - dw) / 2, dy = g_previewRect.top + (ph - dh) / 2;
-            g.DrawImage(g_preview, dx, dy, dw, dh);
+
+            if (g_doneAnim) {
+                // Done animation, part 2: a diagonal wipe sweeps the freshly-finished image on
+                // left-to-right, with a small diamond riding the seam -- the reveal this app's
+                // preview card actually has a natural use for (unlike the video path above).
+                const float rL = (float)g_previewRect.left, rT = (float)g_previewRect.top;
+                const float rR = (float)g_previewRect.right, rB = (float)g_previewRect.bottom;
+                const float rH = rB - rT;
+                const float slant = tanf(kWipeAngleDeg * 3.1415926f / 180.0f) * (rH / 2.0f);
+                const float travel = (rR - rL) + 2.0f * slant;
+                const float centerX = rL - slant + doneP * travel;
+                const float topX = centerX - slant, bottomX = centerX + slant;
+
+                Gdiplus::PointF revealed[4] = { {rL, rT}, {topX, rT}, {bottomX, rB}, {rL, rB} };
+                Gdiplus::GraphicsPath clip;
+                clip.AddPolygon(revealed, 4);
+                g.SetClip(&clip);
+                g.DrawImage(g_preview, dx, dy, dw, dh);
+                g.ResetClip();
+
+                g.SetClip(Gdiplus::RectF(rL, rT, rR - rL, rH));
+                Gdiplus::Pen glowWide(Gdiplus::Color(55, 255, 255, 255), 14.0f);
+                Gdiplus::Pen glowNarrow(Gdiplus::Color(120, 255, 255, 255), 7.0f);
+                Gdiplus::Pen seam(Gdiplus::Color(235, 255, 255, 255), 2.5f);
+                g.DrawLine(&glowWide, topX, rT, bottomX, rB);
+                g.DrawLine(&glowNarrow, topX, rT, bottomX, rB);
+                g.DrawLine(&seam, topX, rT, bottomX, rB);
+
+                const float midX = (topX + bottomX) / 2.0f, midY = (rT + rB) / 2.0f, dsz = 9.0f;
+                Gdiplus::PointF diamond[4] = { {midX, midY - dsz}, {midX + dsz, midY},
+                                                {midX, midY + dsz}, {midX - dsz, midY} };
+                Gdiplus::SolidBrush diamondFill(Gdiplus::Color(255, GetRValue(kColAccent),
+                                                                GetGValue(kColAccent), GetBValue(kColAccent)));
+                Gdiplus::Pen diamondEdge(Gdiplus::Color(255, 255, 255, 255), 2.0f);
+                g.FillPolygon(&diamondFill, diamond, 4);
+                g.DrawPolygon(&diamondEdge, diamond, 4);
+                g.ResetClip();
+            } else {
+                g.DrawImage(g_preview, dx, dy, dw, dh);
+            }
         } else {
             Gdiplus::StringFormat fmt;
             fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
