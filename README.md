@@ -131,7 +131,20 @@ keypress itself; you don't need to do anything.
   relaunch -- Windows keeps an already-loaded DLL mapped in memory
   regardless of what happens to the file on disk afterward.
 
-## Changes in this release
+## Changelog
+
+### v1.0.1
+
+- **Fixed: converting a screenshot (or any PNG/image with an alpha channel)
+  failed outright** with "is not an uncompressed 24-bit BMP". The tool
+  converts your input to BMP via `ffmpeg` before handing it to the add-on;
+  without an explicit pixel format, `ffmpeg` preserves a source's alpha
+  channel and writes a 32-bit BMP instead of a 24-bit one, which the loader
+  rejected. Both the photo path and video frame extraction now force
+  `-pix_fmt bgr24` explicitly, so this can't happen regardless of the
+  source's own format.
+
+### v1.0.0
 
 - **First working end-to-end pipeline.** Earlier attempts drove the add-on's
   engine directly through the generic AMD FidelityFX API (`ffxDispatch`),

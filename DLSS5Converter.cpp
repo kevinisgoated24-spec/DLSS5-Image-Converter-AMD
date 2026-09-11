@@ -94,7 +94,11 @@ int RunCommand(const std::string& cmdline) {
 }
 
 bool ConvertToBmp(const std::string& input, const std::string& outputBmp) {
-    std::string cmd = "ffmpeg -y -loglevel error -i \"" + input + "\" -frames:v 1 -update 1 \"" + outputBmp + "\"";
+    // -pix_fmt bgr24 forces a plain 24-bit BMP regardless of the source's own format. Without
+    // it, ffmpeg preserves an alpha channel when the source has one (any screenshot PNG, for
+    // instance) and writes a 32-bit BMP instead, which LoadBmpAsRgba below rejects outright.
+    std::string cmd = "ffmpeg -y -loglevel error -i \"" + input + "\" -pix_fmt bgr24 -frames:v 1 "
+                       "-update 1 \"" + outputBmp + "\"";
     return RunCommand(cmd) == 0;
 }
 bool ConvertFromBmp(const std::string& inputBmp, const std::string& output) {
@@ -536,8 +540,10 @@ bool ProcessVideo(const std::string& inputPath, const std::string& outputPath, f
     CreateDirectoryA(outFrameDir.c_str(), nullptr);
 
     printf("%s: extracting frames\n", kName);
-    std::string extractCmd = "ffmpeg -y -loglevel error -i \"" + inputPath + "\" -vsync 0 \"" +
-                              frameDir + "\\frame_%06d.bmp\"";
+    // -pix_fmt bgr24: see the comment on ConvertToBmp -- without it a source with an alpha
+    // channel gets written as a 32-bit BMP, which LoadBmpAsRgba rejects.
+    std::string extractCmd = "ffmpeg -y -loglevel error -i \"" + inputPath + "\" -pix_fmt bgr24 "
+                              "-vsync 0 \"" + frameDir + "\\frame_%06d.bmp\"";
     if (RunCommand(extractCmd) != 0) { printf("%s: ffmpeg failed to extract frames\n", kName); return false; }
 
     std::string audioPath = stem + "_audio.m4a";
