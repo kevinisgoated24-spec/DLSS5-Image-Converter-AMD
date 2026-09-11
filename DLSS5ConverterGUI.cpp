@@ -139,6 +139,113 @@ int RunCommand(const std::string& cmdline) {
     return (int)code;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Dependency check, run once at startup. ffmpeg is the one dependency that is actually safe and
+// practical to fetch automatically -- a normal, freely redistributable open-source build with a
+// stable download URL -- and it is only ever fetched after asking, never silently. Everything
+// else (ReShade's dxgi.dll, the add-on, and especially the closed-source engine runtime) either
+// needs an interactive installer or is something this tool has no rights to fetch on your behalf
+// (the engine runtime is Discord-gated, not something with a stable public URL); those just get a
+// specific, actionable report in the log of what is missing and where to get it, instead of a
+// confusing failure partway through a conversion.
+// ---------------------------------------------------------------------------------------------
+
+void PrependToPath(const std::string& dir) {
+    char buf[32768] = {};
+    DWORD len = GetEnvironmentVariableA("PATH", buf, sizeof(buf));
+    std::string newPath = dir + ";" + (len > 0 ? std::string(buf, len) : "");
+    SetEnvironmentVariableA("PATH", newPath.c_str());
+}
+
+bool CheckFfmpegOnPath() {
+    return RunCommand("where ffmpeg >nul 2>nul") == 0 && RunCommand("where ffprobe >nul 2>nul") == 0;
+}
+
+// Downloads gyan.dev's "essentials" static ffmpeg build into <exeDir>\ffmpeg-bin. Writes the
+// download/extract logic to a temp .ps1 file and runs that, rather than trying to compose it as
+// one inline command-line string -- passing a multi-step script through two more layers of shell
+// quoting (this function's own cmd.exe wrapper, then powershell.exe's own -Command parsing) is
+// exactly the kind of thing that breaks in some quoting edge case. A file sidesteps all of that.
+bool DownloadFfmpeg() {
+    const std::string binDir = g_exeDir + "ffmpeg-bin";
+    printf("%s: downloading ffmpeg (about 80 MB, one time only)...\n", kName);
+
+    const std::string scriptPath = g_exeDir + "dlss5convert_get_ffmpeg.ps1";
+    FILE* f = fopen(scriptPath.c_str(), "w");
+    if (!f) { printf("%s: could not write %s\n", kName, scriptPath.c_str()); return false; }
+    fprintf(f,
+        "$ErrorActionPreference = 'Stop'\n"
+        "$zip = Join-Path $env:TEMP 'dlss5convert-ffmpeg.zip'\n"
+        "$ex  = Join-Path $env:TEMP 'dlss5convert-ffmpeg-extract'\n"
+        "Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $zip\n"
+        "Remove-Item -Recurse -Force $ex -ErrorAction SilentlyContinue\n"
+        "Expand-Archive -Path $zip -DestinationPath $ex -Force\n"
+        "New-Item -ItemType Directory -Force -Path '%s' | Out-Null\n"
+        "$bin = Get-ChildItem $ex -Recurse -Filter ffmpeg.exe | Select-Object -First 1 -ExpandProperty DirectoryName\n"
+        "Copy-Item (Join-Path $bin 'ffmpeg.exe') '%s' -Force\n"
+        "Copy-Item (Join-Path $bin 'ffprobe.exe') '%s' -Force\n"
+        "Remove-Item $zip, $ex -Recurse -Force -ErrorAction SilentlyContinue\n",
+        binDir.c_str(), binDir.c_str(), binDir.c_str());
+    fclose(f);
+
+    RunCommand("powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + scriptPath + "\"");
+    remove(scriptPath.c_str());
+
+    bool ok = FileExists(binDir + "\\ffmpeg.exe") && FileExists(binDir + "\\ffprobe.exe");
+    if (ok) printf("%s: ffmpeg installed to %s\n", kName, binDir.c_str());
+    else printf("%s: automatic ffmpeg install failed -- install it yourself and make sure it is "
+                "on PATH (https://ffmpeg.org/download.html)\n", kName);
+    return ok;
+}
+
+bool AskYesNo(const std::string& question) {
+    std::string text = question + "\n\nThis downloads a file from ffmpeg.org's official build "
+                        "host (gyan.dev) and saves it next to this exe.";
+    return MessageBoxA(g_hwnd, text.c_str(), kName, MB_YESNO | MB_ICONQUESTION) == IDYES;
+}
+
+// Returns true only if everything needed to actually run a conversion is present. Unlike the CLI
+// tool this does not stop the program -- the window still opens and shows what's missing in the
+// log, since the user may be about to go fix it (drop a file in, install ReShade) with the window
+// open in front of them.
+bool CheckDependencies() {
+    bool ffmpegOk = CheckFfmpegOnPath();
+    const std::string localFfmpegBin = g_exeDir + "ffmpeg-bin";
+    if (!ffmpegOk && FileExists(localFfmpegBin + "\\ffmpeg.exe") && FileExists(localFfmpegBin + "\\ffprobe.exe")) {
+        PrependToPath(localFfmpegBin);
+        ffmpegOk = true;
+    }
+    if (!ffmpegOk) {
+        if (AskYesNo("ffmpeg was not found. Download a portable copy automatically?")) {
+            if (DownloadFfmpeg()) {
+                PrependToPath(localFfmpegBin);
+                ffmpegOk = CheckFfmpegOnPath();
+            }
+        } else {
+            printf("%s: ffmpeg is required and was not found. Install it yourself and put it on "
+                   "PATH, or restart this app and say yes.\n", kName);
+        }
+    }
+
+    std::vector<std::string> missing;
+    auto need = [&](const char* file, const char* what) {
+        if (!FileExists(g_exeDir + file)) missing.push_back(std::string(file) + " -- " + what);
+    };
+    need("dxgi.dll", "ReShade, add-on build, DirectX 12 target: https://reshade.me/");
+    need("dlss5-neural.addon64", "build the 'neural' target from "
+                                  "https://github.com/zmodelerlover/dlss5-neural-amd");
+    need("dlssnr_amd_pass1.dll", "from that same project's Discord: https://discord.gg/wYhvS3JSHM");
+    need("dlssnr_on_amd_weights.bin", "from that same project's Discord: https://discord.gg/wYhvS3JSHM");
+
+    if (!missing.empty()) {
+        printf("%s: missing dependencies --\n", kName);
+        for (auto& m : missing) printf("%s:   %s\n", kName, m.c_str());
+        printf("%s: see the README for full setup instructions. Converting will fail until "
+               "these are in place.\n", kName);
+    }
+    return ffmpegOk && missing.empty();
+}
+
 bool ConvertToBmp(const std::string& input, const std::string& outputBmp) {
     // -pix_fmt bgr24 forces a plain 24-bit BMP regardless of the source's own format. Without
     // it, ffmpeg preserves an alpha channel when the source has one (any screenshot PNG, for
@@ -875,6 +982,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int) {
                              CW_USEDEFAULT, CW_USEDEFAULT, 660, 480, nullptr, nullptr, hInstance, nullptr);
     ShowWindow(g_hwnd, SW_SHOW);
     UpdateWindow(g_hwnd);
+
+    CheckDependencies();
 
     // A file dropped on the exe / passed on the command line pre-fills the input.
     if (lpCmdLine && lpCmdLine[0]) {

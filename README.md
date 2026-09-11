@@ -38,7 +38,9 @@ clone of NVIDIA's.
   tool, a CI runner, or anything launched non-interactively** --
   `CreateSwapChainForHwnd` fails with `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`
   outside Session 0's interactive desktop. Double-click it.
-- [`ffmpeg`](https://ffmpeg.org/) (with `ffprobe`) on your `PATH`
+- [`ffmpeg`](https://ffmpeg.org/) (with `ffprobe`) on your `PATH` -- **or just
+  say yes** when the tool offers to download a portable copy for you on
+  first run
 - Visual Studio 2022+ with the "Desktop development with C++" workload, to
   build
 
@@ -57,6 +59,17 @@ NVIDIA files:
 | `dlssnr_on_amd.ini` | The engine's own settings file | Auto-created on first run if missing |
 
 Put all of these next to `DLSS5Converter.exe` / `DLSS5ConverterGUI.exe`.
+
+**Both tools check for all of this automatically on startup** and tell you
+specifically what's missing and where to get it, rather than letting you hit
+a confusing failure partway through a conversion. `ffmpeg` is the one
+exception it can actually fix for you -- it's a normal, freely
+redistributable open-source build with a stable download URL, so the tool
+offers to download a portable copy into `ffmpeg-bin\` next to itself (only
+after you say yes; it never downloads anything on its own initiative). The
+other files either need an interactive installer (ReShade) or aren't
+something this tool has the rights to fetch on your behalf (the engine
+runtime is Discord-gated) -- those just get reported clearly instead.
 
 ## Building
 
@@ -132,6 +145,17 @@ keypress itself; you don't need to do anything.
   regardless of what happens to the file on disk afterward.
 
 ## Changelog
+
+### v1.0.3
+
+- **Startup dependency check.** Both tools now check for everything they
+  need on launch and report exactly what's missing and where to get it,
+  instead of failing confusingly mid-conversion. `ffmpeg` is offered as an
+  automatic download (portable, into `ffmpeg-bin\`, only after you say yes)
+  since it's the one dependency this tool actually has the rights and a
+  stable source to fetch on your behalf; the CLI tool won't proceed to a
+  conversion until everything required is in place, the GUI shows the same
+  report in its log without blocking the window from opening.
 
 ### v1.0.2
 
