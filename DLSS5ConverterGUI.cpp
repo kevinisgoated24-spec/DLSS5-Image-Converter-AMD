@@ -99,7 +99,7 @@ CRITICAL_SECTION g_previewLock;
 // ---------------------------------------------------------------------------------------------
 bool g_doneAnim = false;
 DWORD g_doneAnimStart = 0;
-constexpr DWORD kDoneAnimMs = 650;
+constexpr DWORD kDoneAnimMs = 900;
 constexpr float kWipeAngleDeg = 12.0f;
 const RECT kDoneBarRect = { 20, 390, 680, 398 }; // same slot g_progress's marquee bar sits in
 
@@ -1156,11 +1156,11 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!result->isVideo) SetPreview(result->outputPath);
             g_doneAnim = true;
             g_doneAnimStart = GetTickCount();
-            SetTimer(hwnd, IdDoneAnimTimer, 15, nullptr);
+            SetTimer(hwnd, IdDoneAnimTimer, 20, nullptr);
         } else {
             SetStatus("Failed -- see the log above.");
         }
-        InvalidateRect(hwnd, nullptr, TRUE);
+        InvalidateRect(hwnd, nullptr, FALSE);
         delete result;
         return 0;
     }
@@ -1349,7 +1349,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
 
-    const DWORD winStyle = WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
+    // WS_CLIPCHILDREN matters here specifically because of the done-animation: without it,
+    // the parent's GDI+ repaint (fired at ~50 Hz for the duration of the wipe) and the child
+    // controls' own repaints aren't excluded from each other, which is what was causing the
+    // brief flicker during that animation. Nothing else in this window repaints often enough
+    // for the lack of it to have been visible before.
+    const DWORD winStyle = (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN;
     RECT winRect = { 0, 0, kWinW, kWinH };
     AdjustWindowRectEx(&winRect, winStyle, FALSE, WS_EX_ACCEPTFILES);
     g_hwnd = CreateWindowExA(WS_EX_ACCEPTFILES, "Dlss5ConverterGuiWindow", kName, winStyle,
