@@ -153,8 +153,16 @@ keypress itself; you don't need to do anything.
 
 ## Changelog
 
-### Unreleased (docs only)
+### v1.1.0
 
+- **GUI redesign.** A real light, card-based layout (Input / Settings / Log
+  / Preview panels) instead of a bare gray dialog: modern-themed controls
+  (a manifest now pulls in the current common-controls style instead of the
+  ancient Windows 2000 raised-3D look), Segoe UI throughout with actual
+  typographic hierarchy, a custom accent-purple rounded Convert button, a
+  real progress bar while converting, and a small procedural app icon.
+  Bigger window (700x820) with proper spacing. No behavior changes -- the
+  CLI tool and the underlying engine-driving code are untouched.
 - **Corrected the intensity guidance.** Real-world use since v1.0.0 has
   shown Intensity = 1.00 (full strength) looks clean through this tool's
   actual pipeline (the real add-on via ReShade) -- the harsh/oversaturated

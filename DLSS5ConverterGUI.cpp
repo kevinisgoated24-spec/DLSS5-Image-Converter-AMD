@@ -30,6 +30,14 @@
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "dwmapi.lib")
+
+// Pulls in the modern (themed) common-controls implementation at link time -- without this,
+// buttons/edit boxes/the trackbar render in the ancient Windows 2000 raised-3D style regardless
+// of what OS this actually runs on. No separate .manifest file or resource-compiler step needed.
+#pragma comment(linker, \
+    "\"/manifestdependency:type='Win32' name='Microsoft.Windows.Common-Controls' "\
+    "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 using Microsoft::WRL::ComPtr;
 
@@ -49,13 +57,14 @@ enum {
     IdFilePath = 1005,
     IdLog = 1006,
     IdStatus = 1007,
+    IdProgress = 1008,
 };
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_DONE = WM_APP + 2;
 
 HWND g_hwnd = nullptr;
 HWND g_editLog = nullptr, g_editPath = nullptr, g_lblIntensity = nullptr, g_lblStatus = nullptr;
-HWND g_btnChoose = nullptr, g_btnConvert = nullptr, g_slider = nullptr;
+HWND g_btnChoose = nullptr, g_btnConvert = nullptr, g_slider = nullptr, g_progress = nullptr;
 std::string g_inputPath;
 // The add-on itself always looks for dlss5-neural.ini/.log next to its own DLL (i.e. next to
 // this exe), via GetModuleFileNameW on its own module handle -- not relative to whatever the
@@ -69,7 +78,81 @@ float g_intensity = 0.08f;
 bool g_busy = false;
 Gdiplus::Bitmap* g_preview = nullptr;
 CRITICAL_SECTION g_previewLock;
-RECT g_previewRect = { 20, 260, 620, 640 };
+
+// ---------------------------------------------------------------------------------------------
+// Theme: a light, card-based layout instead of a bare gray dialog. Cards are drawn as rounded
+// rectangles directly onto the window background in WM_PAINT; the actual controls (still normal
+// Win32 child windows -- nothing here is owner-drawn except the Convert button) sit visually
+// inside them. Coordinates are all client-area pixels for a fixed 700x820 window.
+// ---------------------------------------------------------------------------------------------
+
+constexpr int kWinW = 700, kWinH = 820;
+const RECT kCardInput    = { 20,  86, 680, 174 };
+const RECT kCardSettings = { 20, 188, 680, 268 };
+const RECT kCardLog      = { 20, 358, 680, 462 };
+const RECT kCardPreview  = { 20, 476, 680, 796 };
+RECT g_previewRect = { kCardPreview.left + 10, kCardPreview.top + 10,
+                        kCardPreview.right - 10, kCardPreview.bottom - 10 };
+
+constexpr COLORREF kColBg         = RGB(244, 244, 247);
+constexpr COLORREF kColCard       = RGB(255, 255, 255);
+constexpr COLORREF kColCardEdge   = RGB(226, 226, 232);
+constexpr COLORREF kColText       = RGB(26, 26, 31);
+constexpr COLORREF kColTextMuted  = RGB(114, 114, 124);
+constexpr COLORREF kColAccent     = RGB(124, 92, 252);
+constexpr COLORREF kColAccentDark = RGB(99, 70, 226);
+constexpr COLORREF kColAccentDis  = RGB(206, 197, 245);
+
+HFONT g_fontTitle = nullptr, g_fontSubtitle = nullptr, g_fontBody = nullptr, g_fontBold = nullptr,
+      g_fontButton = nullptr;
+HICON g_appIcon = nullptr;
+HBRUSH g_brushBg = nullptr, g_brushCard = nullptr;
+
+void CreateThemeFonts() {
+    g_fontTitle = CreateFontA(-26, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                               DEFAULT_PITCH, "Segoe UI");
+    g_fontSubtitle = CreateFontA(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                  DEFAULT_PITCH, "Segoe UI");
+    g_fontBody = CreateFontA(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH, "Segoe UI");
+    g_fontBold = CreateFontA(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH, "Segoe UI");
+    g_fontButton = CreateFontA(-16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                DEFAULT_PITCH, "Segoe UI");
+}
+
+// A small procedural icon (no image asset in this repo to draw from): a rounded accent-colour
+// square with a simple white spark/star mark, rendered via GDI+ and converted to an HICON.
+HICON MakeAppIcon() {
+    const int size = 32;
+    Gdiplus::Bitmap bmp(size, size, PixelFormat32bppARGB);
+    Gdiplus::Graphics g(&bmp);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush accent(Gdiplus::Color(255, GetRValue(kColAccent), GetGValue(kColAccent),
+                                               GetBValue(kColAccent)));
+    Gdiplus::GraphicsPath path;
+    const float r = 8.0f, w = (float)size, h = (float)size;
+    path.AddArc(0.0f, 0.0f, r * 2, r * 2, 180.0f, 90.0f);
+    path.AddArc(w - r * 2, 0.0f, r * 2, r * 2, 270.0f, 90.0f);
+    path.AddArc(w - r * 2, h - r * 2, r * 2, r * 2, 0.0f, 90.0f);
+    path.AddArc(0.0f, h - r * 2, r * 2, r * 2, 90.0f, 90.0f);
+    path.CloseFigure();
+    g.FillPath(&accent, &path);
+    Gdiplus::SolidBrush white(Gdiplus::Color(255, 255, 255, 255));
+    Gdiplus::PointF star[10] = {
+        {16, 5}, {18.5f, 12.5f}, {26, 13.5f}, {20, 18.5f}, {22, 26},
+        {16, 21.5f}, {10, 26}, {12, 18.5f}, {6, 13.5f}, {13.5f, 12.5f},
+    };
+    g.FillPolygon(&white, star, 10);
+    HICON icon = nullptr;
+    bmp.GetHICON(&icon);
+    return icon;
+}
 
 // Logs to both the console (useful when run from a terminal) and the GUI's log box. Every
 // printf(...) call in the processing code below is routed through this via the macro further
@@ -807,8 +890,11 @@ void StartConversion() {
     g_busy = true;
     EnableWindow(g_btnConvert, FALSE);
     EnableWindow(g_btnChoose, FALSE);
+    InvalidateRect(g_btnConvert, nullptr, TRUE);
     SetWindowTextA(g_editLog, "");
     SetStatus("Working...");
+    ShowWindow(g_progress, SW_SHOW);
+    SendMessageA(g_progress, PBM_SETMARQUEE, TRUE, 30);
     auto* param = new std::string(g_inputPath);
     CloseHandle(CreateThread(nullptr, 0, ConvertThread, param, 0, nullptr));
 }
@@ -827,35 +913,62 @@ void SetInputPath(const std::string& path) {
 LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
-        HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        auto mk = [&](const char* cls, const char* text, int x, int y, int w, int h, DWORD style, int id) {
+        CreateThemeFonts();
+        g_brushBg = CreateSolidBrush(kColBg);
+        g_brushCard = CreateSolidBrush(kColCard);
+        auto mk = [&](const char* cls, const char* text, int x, int y, int w, int h, DWORD style,
+                      int id, HFONT fnt) {
             HWND c = CreateWindowExA(0, cls, text, style | WS_CHILD | WS_VISIBLE, x, y, w, h,
                                       hwnd, (HMENU)(INT_PTR)id, GetModuleHandle(nullptr), nullptr);
-            SendMessageA(c, WM_SETFONT, (WPARAM)font, TRUE);
+            SendMessageA(c, WM_SETFONT, (WPARAM)fnt, TRUE);
             return c;
         };
-        mk("STATIC", "Drag a photo or video onto this window, or:", 20, 15, 400, 20, SS_LEFT, 0);
-        g_btnChoose = mk("BUTTON", "Choose File...", 20, 40, 140, 28, BS_PUSHBUTTON, IdChoose);
-        g_editPath = mk("EDIT", "(no file selected)", 170, 44, 470, 20,
-                        ES_READONLY | ES_AUTOHSCROLL | WS_BORDER, IdFilePath);
 
-        mk("STATIC", "Intensity:", 20, 85, 70, 20, SS_LEFT, 0);
+        // Card: input
+        mk("STATIC", "Drag a photo or video onto this window, or click Choose File",
+           kCardInput.left + 16, kCardInput.top + 12, 600, 20, SS_LEFT, 0, g_fontBody);
+        g_btnChoose = mk("BUTTON", "Choose File...", kCardInput.left + 16, kCardInput.top + 42,
+                          140, 32, BS_PUSHBUTTON, IdChoose, g_fontBody);
+        g_editPath = mk("EDIT", "No file selected", kCardInput.left + 168, kCardInput.top + 46,
+                         kCardInput.right - kCardInput.left - 168 - 16, 24,
+                         ES_READONLY | ES_AUTOHSCROLL | WS_BORDER, IdFilePath, g_fontBody);
+
+        // Card: settings
+        mk("STATIC", "Intensity", kCardSettings.left + 16, kCardSettings.top + 12, 200, 20,
+           SS_LEFT, 0, g_fontBold);
         g_slider = CreateWindowExA(0, TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
-                                    90, 80, 300, 30, hwnd, (HMENU)(INT_PTR)IdIntensitySlider,
-                                    GetModuleHandle(nullptr), nullptr);
+                                    kCardSettings.left + 16, kCardSettings.top + 36, 340, 30, hwnd,
+                                    (HMENU)(INT_PTR)IdIntensitySlider, GetModuleHandle(nullptr), nullptr);
+        SendMessageA(g_slider, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
         SendMessageA(g_slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
         SendMessageA(g_slider, TBM_SETPOS, TRUE, (LPARAM)(int)(g_intensity * 100));
         SendMessageA(g_slider, TBM_SETTICFREQ, 10, 0);
-        g_lblIntensity = mk("STATIC", "0.08  (0.05-0.15 looked cleanest tonight; 0.25+ gets harsh)",
-                            400, 85, 260, 20, SS_LEFT, IdIntensityLabel);
+        g_lblIntensity = mk("STATIC", "0.08  --  0.00 = original, 1.00 = full strength",
+                             kCardSettings.left + 372, kCardSettings.top + 42,
+                             kCardSettings.right - kCardSettings.left - 372 - 16, 20, SS_LEFT,
+                             IdIntensityLabel, g_fontBody);
 
-        g_btnConvert = mk("BUTTON", "Convert", 20, 125, 140, 32, BS_PUSHBUTTON, IdConvert);
+        // Convert + status + progress (sit directly on the window background, between cards)
+        g_btnConvert = mk("BUTTON", "Convert", 20, 284, 160, 42,
+                           BS_OWNERDRAW | BS_NOTIFY, IdConvert, g_fontButton);
         EnableWindow(g_btnConvert, FALSE);
-        g_lblStatus = mk("STATIC", "Ready.", 170, 130, 470, 20, SS_LEFT, IdStatus);
+        g_lblStatus = mk("STATIC", "Ready.", 196, 296, 464, 22, SS_LEFT, IdStatus, g_fontBody);
+        g_progress = CreateWindowExA(0, PROGRESS_CLASSA, "", WS_CHILD | PBS_MARQUEE, 20, 334, 660,
+                                      8, hwnd, (HMENU)(INT_PTR)IdProgress, GetModuleHandle(nullptr),
+                                      nullptr);
 
-        mk("STATIC", "Log:", 20, 170, 100, 20, SS_LEFT, 0);
-        g_editLog = mk("EDIT", "", 20, 190, 600, 60,
-                       ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, IdLog);
+        // Card: log
+        mk("STATIC", "Log", kCardLog.left + 16, kCardLog.top + 10, 100, 20, SS_LEFT, 0, g_fontBold);
+        g_editLog = mk("EDIT", "", kCardLog.left + 16, kCardLog.top + 34,
+                        kCardLog.right - kCardLog.left - 32, kCardLog.bottom - kCardLog.top - 34 - 12,
+                        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, IdLog,
+                        g_fontBody);
+
+        g_appIcon = MakeAppIcon();
+        if (g_appIcon) {
+            SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_appIcon);
+            SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_appIcon);
+        }
 
         DragAcceptFiles(hwnd, TRUE);
         InitializeCriticalSection(&g_previewLock);
@@ -873,10 +986,26 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int pos = (int)SendMessageA(g_slider, TBM_GETPOS, 0, 0);
             g_intensity = pos / 100.0f;
             char buf[96];
-            snprintf(buf, sizeof(buf), "%.2f  (0.05-0.15 looked cleanest tonight; 0.25+ gets harsh)", g_intensity);
+            snprintf(buf, sizeof(buf), "%.2f  --  0.00 = original, 1.00 = full strength", g_intensity);
             SetWindowTextA(g_lblIntensity, buf);
         }
         return 0;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wp;
+        HWND ctl = (HWND)lp;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, GetDlgCtrlID(ctl) == IdStatus ? kColText : kColText);
+        // Everything except the Convert-row status label sits on a white card; that one sits
+        // directly on the window background.
+        return (LRESULT)(GetDlgCtrlID(ctl) == IdStatus ? g_brushBg : g_brushCard);
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = (HDC)wp;
+        SetBkMode(hdc, OPAQUE);
+        SetBkColor(hdc, kColCard);
+        SetTextColor(hdc, kColText);
+        return (LRESULT)g_brushCard;
     }
     case WM_COMMAND:
         if (LOWORD(wp) == IdChoose && HIWORD(wp) == BN_CLICKED) {
@@ -895,6 +1024,38 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             StartConversion();
         }
         return 0;
+    case WM_DRAWITEM: {
+        auto* dis = (DRAWITEMSTRUCT*)lp;
+        if (dis->CtlID != IdConvert) break;
+        Gdiplus::Graphics g(dis->hDC);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+        const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+        const COLORREF fill = disabled ? kColAccentDis : (pressed ? kColAccentDark : kColAccent);
+        Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(fill), GetGValue(fill), GetBValue(fill)));
+        const float w = (float)(dis->rcItem.right - dis->rcItem.left);
+        const float h = (float)(dis->rcItem.bottom - dis->rcItem.top);
+        const float r = 8.0f;
+        Gdiplus::GraphicsPath path;
+        path.AddArc(0.0f, 0.0f, r * 2, r * 2, 180.0f, 90.0f);
+        path.AddArc(w - r * 2, 0.0f, r * 2, r * 2, 270.0f, 90.0f);
+        path.AddArc(w - r * 2, h - r * 2, r * 2, r * 2, 0.0f, 90.0f);
+        path.AddArc(0.0f, h - r * 2, r * 2, r * 2, 90.0f, 90.0f);
+        path.CloseFigure();
+        g.FillPath(&brush, &path);
+
+        char text[64];
+        GetWindowTextA(dis->hwndItem, text, sizeof(text));
+        std::wstring wtext(text, text + strlen(text));
+        Gdiplus::Font font(L"Segoe UI", 11, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+        Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 255, 255, 255));
+        Gdiplus::StringFormat fmt;
+        fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+        fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        Gdiplus::RectF rect(0, 0, w, h);
+        g.DrawString(wtext.c_str(), -1, &font, rect, &fmt, &textBrush);
+        return TRUE;
+    }
     case WM_APP_LOG: {
         char* text = (char*)lp;
         int len = GetWindowTextLengthA(g_editLog);
@@ -908,6 +1069,9 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_busy = false;
         EnableWindow(g_btnConvert, TRUE);
         EnableWindow(g_btnChoose, TRUE);
+        InvalidateRect(g_btnConvert, nullptr, TRUE);
+        SendMessageA(g_progress, PBM_SETMARQUEE, FALSE, 0);
+        ShowWindow(g_progress, SW_HIDE);
         if (result->ok) {
             char buf[MAX_PATH + 32];
             snprintf(buf, sizeof(buf), "Done -- wrote %s", result->outputPath);
@@ -919,11 +1083,56 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         delete result;
         return 0;
     }
+    case WM_ERASEBKGND:
+        return 1; // WM_PAINT below paints the whole client area every time; avoid the flash-fill
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-        Gdiplus::Graphics g(hdc);
+        RECT client;
+        GetClientRect(hwnd, &client);
+
+        // Double-buffered: everything below is drawn to an off-screen bitmap first and blitted
+        // once, so the background/cards/preview never visibly flash or tear on repaint.
+        Gdiplus::Bitmap buffer(client.right, client.bottom, PixelFormat32bppPARGB);
+        Gdiplus::Graphics g(&buffer);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.Clear(Gdiplus::Color(255, GetRValue(kColBg), GetGValue(kColBg), GetBValue(kColBg)));
+
+        auto DrawCard = [&](const RECT& r) {
+            Gdiplus::SolidBrush fill(Gdiplus::Color(255, GetRValue(kColCard), GetGValue(kColCard),
+                                                     GetBValue(kColCard)));
+            Gdiplus::Pen edge(Gdiplus::Color(255, GetRValue(kColCardEdge), GetGValue(kColCardEdge),
+                                              GetBValue(kColCardEdge)), 1.0f);
+            const float x = (float)r.left, y = (float)r.top;
+            const float w = (float)(r.right - r.left), h = (float)(r.bottom - r.top), rad = 10.0f;
+            Gdiplus::GraphicsPath path;
+            path.AddArc(x, y, rad * 2, rad * 2, 180.0f, 90.0f);
+            path.AddArc(x + w - rad * 2, y, rad * 2, rad * 2, 270.0f, 90.0f);
+            path.AddArc(x + w - rad * 2, y + h - rad * 2, rad * 2, rad * 2, 0.0f, 90.0f);
+            path.AddArc(x, y + h - rad * 2, rad * 2, rad * 2, 90.0f, 90.0f);
+            path.CloseFigure();
+            g.FillPath(&fill, &path);
+            g.DrawPath(&edge, &path);
+        };
+        DrawCard(kCardInput);
+        DrawCard(kCardSettings);
+        DrawCard(kCardLog);
+        DrawCard(kCardPreview);
+
+        // Header: drawn directly (not a STATIC control) for crisper text and one less thing that
+        // needs WM_CTLCOLORSTATIC handling to blend into the background correctly.
+        Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, GetRValue(kColText), GetGValue(kColText),
+                                                      GetBValue(kColText)));
+        Gdiplus::SolidBrush mutedBrush(Gdiplus::Color(255, GetRValue(kColTextMuted),
+                                                       GetGValue(kColTextMuted), GetBValue(kColTextMuted)));
+        Gdiplus::Font titleFont(L"Segoe UI", 19, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font subFont(L"Segoe UI", 12, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        g.DrawString(L"DLSS5 Converter", -1, &titleFont, Gdiplus::PointF(20, 16), &textBrush);
+        g.DrawString(L"Neural rendering for AMD GPUs, offline", -1, &subFont,
+                     Gdiplus::PointF(20, 52), &mutedBrush);
+
+        // Preview card's interior
         EnterCriticalSection(&g_previewLock);
         if (g_preview) {
             int pw = g_previewRect.right - g_previewRect.left, ph = g_previewRect.bottom - g_previewRect.top;
@@ -932,17 +1141,30 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int dx = g_previewRect.left + (pw - dw) / 2, dy = g_previewRect.top + (ph - dh) / 2;
             g.DrawImage(g_preview, dx, dy, dw, dh);
         } else {
-            HBRUSH b = CreateSolidBrush(RGB(240, 240, 240));
-            FillRect(hdc, &g_previewRect, b);
-            DeleteObject(b);
-            DrawTextA(hdc, "Preview appears here after a photo conversion", -1, &g_previewRect,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            Gdiplus::StringFormat fmt;
+            fmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+            fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            Gdiplus::RectF rect((float)g_previewRect.left, (float)g_previewRect.top,
+                                (float)(g_previewRect.right - g_previewRect.left),
+                                (float)(g_previewRect.bottom - g_previewRect.top));
+            g.DrawString(L"Preview appears here after a photo conversion", -1, &subFont, rect, &fmt,
+                        &mutedBrush);
         }
         LeaveCriticalSection(&g_previewLock);
+
+        Gdiplus::Graphics screen(hdc);
+        screen.DrawImage(&buffer, 0, 0);
         EndPaint(hwnd, &ps);
         return 0;
     }
     case WM_DESTROY:
+        if (g_fontTitle) DeleteObject(g_fontTitle);
+        if (g_fontSubtitle) DeleteObject(g_fontSubtitle);
+        if (g_fontBody) DeleteObject(g_fontBody);
+        if (g_fontBold) DeleteObject(g_fontBold);
+        if (g_fontButton) DeleteObject(g_fontButton);
+        if (g_brushBg) DeleteObject(g_brushBg);
+        if (g_brushCard) DeleteObject(g_brushCard);
         PostQuitMessage(0);
         return 0;
     }
@@ -952,6 +1174,8 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 } // namespace
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int) {
+    SetProcessDPIAware(); // crisp text/GDI+ drawing on scaled displays instead of blurry OS upscale
+
     char exePath[MAX_PATH];
     GetModuleFileNameA(nullptr, exePath, MAX_PATH);
     if (char* slash = strrchr(exePath, '\\')) *(slash + 1) = '\0';
@@ -963,7 +1187,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     SetConsoleTitleA("DLSS5 Converter -- log");
 
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES | ICC_PROGRESS_CLASS };
     InitCommonControlsEx(&icc);
     ULONG_PTR gdiToken;
     Gdiplus::GdiplusStartupInput gdiInput;
@@ -973,13 +1197,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int) {
     wc.lpfnWndProc = GuiWndProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = "Dlss5ConverterGuiWindow";
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = nullptr; // WM_ERASEBKGND / WM_PAINT own the whole client area
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
 
-    g_hwnd = CreateWindowExA(WS_EX_ACCEPTFILES, "Dlss5ConverterGuiWindow", kName,
-                             WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 660, 480, nullptr, nullptr, hInstance, nullptr);
+    const DWORD winStyle = WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
+    RECT winRect = { 0, 0, kWinW, kWinH };
+    AdjustWindowRectEx(&winRect, winStyle, FALSE, WS_EX_ACCEPTFILES);
+    g_hwnd = CreateWindowExA(WS_EX_ACCEPTFILES, "Dlss5ConverterGuiWindow", kName, winStyle,
+                             CW_USEDEFAULT, CW_USEDEFAULT, winRect.right - winRect.left,
+                             winRect.bottom - winRect.top, nullptr, nullptr, hInstance, nullptr);
     ShowWindow(g_hwnd, SW_SHOW);
     UpdateWindow(g_hwnd);
 
