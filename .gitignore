@@ -1,0 +1,37 @@
+# Build output and MSVC intermediates
+*.exe
+*.obj
+*.ilk
+*.pdb
+*.exp
+*.lib
+*.res
+
+# Proprietary/redistributable-restricted runtime files -- see README for where to get these.
+# None of them are ours to publish.
+dxgi.dll
+dlss5-neural.addon64
+dlssnr_amd_pass1.dll
+dlssnr_on_amd_weights.bin
+version.dll
+version.dll.disabled
+nvngx_dlssnr.dll
+ReShade.ini
+ReShade.log
+ReShade.log1
+ReShade.log2
+ReShadePreset.ini
+dlssnr_on_amd.ini
+dlssnr_on_amd.log
+dlss5-neural.ini
+dlss5-neural.log
+
+# Per-run temp/working files this tool creates next to itself
+dlss5convert_in.bmp
+dlss5convert_out.bmp
+*_dlss5.png
+*_dlss5.mp4
+*_frames/
+*_frames_out/
+*_audio.m4a
+*_fps.txt
