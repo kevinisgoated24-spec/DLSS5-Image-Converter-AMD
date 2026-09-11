@@ -21,12 +21,11 @@ clone of NVIDIA's.
 ## What you actually get
 
 - Drop in a photo (png/jpg/webp/bmp/...) or a video (mp4/mov/mkv/avi/webm/...)
-- The add-on's neural correction is blended back with the original at a low
-  strength (0.08 by default, adjustable) -- **this is the load-bearing
-  setting**. At full strength (1.00, the add-on's own default) the result is
-  harsh and oversaturated on real photographic/video content; every test that
-  actually looked clean landed around 0.05-0.15. See "Why intensity matters"
-  below.
+- The add-on's neural correction is blended back with the original at an
+  adjustable strength, 0.08 by default -- a conservative starting point, not
+  a hard ceiling. 1.00 (full strength, the add-on's own default) has since
+  tested clean and good-looking too; see "Why intensity matters" below for
+  why the default is more cautious than that.
 - Video: frames are run through the add-on in order, with temporal history
   carried frame to frame (same as a live game), then re-encoded at the
   source frame rate with the original audio remuxed back in.
@@ -100,15 +99,23 @@ No input given opens the same file picker as the GUI.
 
 ## Why intensity matters
 
-The add-on's own default, Intensity = 1.00, is the network's raw, full
-strength output with nothing held back. On real photographic and video
-content (as opposed to PCSX2, the only content this add-on's upstream
-project actually validated against) that reads as harsh, oversaturated, and
-edge-haloed -- not a bug, just what the correction looks like before it's
-blended back with the original. Testing across a real photo and a real
-video, 0.25 was already visibly harsh, 0.15 was good, and 0.08 was the
-cleanest of everything tried. That's this tool's default; `--intensity` (CLI)
-or the slider (GUI) overrides it.
+Early testing (before this tool switched to driving the real add-on through
+ReShade -- see "How it works") used a cruder approach that talked to the
+engine directly through the generic AMD FidelityFX API, with none of the
+add-on's own correct compose/encoding math involved. On that path, Intensity
+= 1.00 (the network's raw, full-strength output) read as harsh, oversaturated,
+and edge-haloed on real photo/video content, and blending it back with the
+source at ~0.08 was what made it usable. That finding shaped this tool's
+default.
+
+Once switched to driving the real add-on (what this tool has always done),
+that problem mostly goes away: real-world testing since has found Intensity
+= 1.00 looks clean and works well through this pipeline too -- the harshness
+was specific to the abandoned raw-engine approach, not something inherent to
+running at full strength. The default is still the conservative 0.08 for now,
+but don't hesitate to push the slider (GUI) or `--intensity` (CLI) up toward
+1.00 -- it's a legitimate, tested-good setting on this tool's actual
+pipeline, not just a fallback.
 
 ## How it works
 
@@ -145,6 +152,16 @@ keypress itself; you don't need to do anything.
   regardless of what happens to the file on disk afterward.
 
 ## Changelog
+
+### Unreleased (docs only)
+
+- **Corrected the intensity guidance.** Real-world use since v1.0.0 has
+  shown Intensity = 1.00 (full strength) looks clean through this tool's
+  actual pipeline (the real add-on via ReShade) -- the harsh/oversaturated
+  result at 1.00 documented below was specific to an early, abandoned
+  raw-engine approach this tool no longer uses. The default stays at the
+  conservative 0.08 for now, but 1.00 is a legitimate, tested-good setting,
+  not just a fallback. See "Why intensity matters".
 
 ### v1.0.3
 
