@@ -1,6 +1,6 @@
 # DLSS5 Converter -- dependency installer.
 # Fetches dxgi.dll, the neural add-on, its weights, and the ReShade/add-on config files from
-# MediaFire and drops them next to this script (i.e. next to DLSS5ConverterGUI.exe). ffmpeg is
+# Google Drive and drops them next to this script (i.e. next to DLSS5ConverterGUI.exe). ffmpeg is
 # not part of this -- the exe fetches that itself on first run if it's not already on PATH.
 
 $ErrorActionPreference = 'Stop'
@@ -62,21 +62,17 @@ Say "  dlss5-neural.addon64        -- the neural upscaling add-on"
 Say "  dlssnr_amd_pass1.dll        -- pass-1 runtime"
 Say "  dlssnr_on_amd_weights.bin   -- model weights (the big one, ~148 MB)"
 Say "  dlssnr_on_amd.ini, ReShade.ini -- config"
-Say "  from: https://www.mediafire.com/file/pw9ap24mfq89hyq/DLSS5.zip/file"
+Say "  from: Google Drive"
 
 Rule 'Output'
 $installOk = $false
 try {
-    Say "Locating the download link on MediaFire..."
-    $page = Invoke-WebRequest -Uri 'https://www.mediafire.com/file/pw9ap24mfq89hyq/DLSS5.zip/file' `
-                               -UseBasicParsing -Headers @{ 'User-Agent' = 'Mozilla/5.0' }
-    $m = [regex]::Match($page.Content, 'https://download\d+\.mediafire\.com/\S+?\.zip')
-    if (-not $m.Success) {
-        throw 'Could not find a download link on the MediaFire page -- the page layout may have changed, or the link may be dead.'
-    }
-
+    # confirm=t is Google Drive's standard bypass for the "can't scan this file for viruses"
+    # interstitial it puts in front of anything over 100 MB -- without it, this URL serves that
+    # warning page's HTML instead of the zip. Verified stable without a session-tied uuid/cookie.
+    $driveUrl = 'https://drive.usercontent.google.com/download?id=1Ikex9j3I1s_NSxh5YTGZnVDC_mXU4Mzd&export=download&confirm=t'
     Say "Downloading dependency package (about 105 MB)..."
-    Invoke-WebRequest -Uri $m.Value -OutFile 'dlss5convert_deps.zip' -Headers @{ 'User-Agent' = 'Mozilla/5.0' }
+    Invoke-WebRequest -Uri $driveUrl -OutFile 'dlss5convert_deps.zip' -Headers @{ 'User-Agent' = 'Mozilla/5.0' }
 
     Say "Extracting..."
     Remove-Item -Recurse -Force 'dlss5convert_deps_tmp' -ErrorAction SilentlyContinue
@@ -101,8 +97,9 @@ if ($installOk) {
     Write-Host "Install FAILED." -ForegroundColor Red -NoNewline
     $log | Set-Content -Path $logPath -Encoding utf8
     Write-Host "  Log written to $logPath" -ForegroundColor Gray
-    Write-Host "You can also grab the zip by hand from the MediaFire link above and drop its" -ForegroundColor Gray
-    Write-Host "contents next to DLSS5ConverterGUI.exe yourself." -ForegroundColor Gray
+    Write-Host "You can also grab the zip by hand from:" -ForegroundColor Gray
+    Write-Host "  https://drive.google.com/file/d/1Ikex9j3I1s_NSxh5YTGZnVDC_mXU4Mzd/view" -ForegroundColor Gray
+    Write-Host "and drop its contents next to DLSS5ConverterGUI.exe yourself." -ForegroundColor Gray
 }
 Write-Host ""
 
