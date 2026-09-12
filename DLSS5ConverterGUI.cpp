@@ -1000,10 +1000,15 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                     kCardSettings.left + 16, kCardSettings.top + 36, 340, 30, hwnd,
                                     (HMENU)(INT_PTR)IdIntensitySlider, GetModuleHandle(nullptr), nullptr);
         SendMessageA(g_slider, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
-        SendMessageA(g_slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+        // Range goes to 200 (2.00) rather than the addon's own "full strength" ceiling of 1.00,
+        // per a user request to be able to push past that -- dlss5-neural.addon64 is closed-
+        // source so there's no way to confirm from here whether >1.00 does anything stronger or
+        // just gets clamped internally, but nothing stops the value from being sent, and the CLI
+        // tool's own --intensity flag already accepted it unclamped.
+        SendMessageA(g_slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
         SendMessageA(g_slider, TBM_SETPOS, TRUE, (LPARAM)(int)(g_intensity * 100));
-        SendMessageA(g_slider, TBM_SETTICFREQ, 10, 0);
-        g_lblIntensity = mk("STATIC", "0.08  --  0.00 = original, 1.00 = full strength",
+        SendMessageA(g_slider, TBM_SETTICFREQ, 20, 0);
+        g_lblIntensity = mk("STATIC", "0.08  --  0.00 = original, 2.00 = strongest",
                              kCardSettings.left + 372, kCardSettings.top + 42,
                              kCardSettings.right - kCardSettings.left - 372 - 16, 20, SS_LEFT,
                              IdIntensityLabel, g_fontBody);
@@ -1063,7 +1068,7 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int pos = (int)SendMessageA(g_slider, TBM_GETPOS, 0, 0);
             g_intensity = pos / 100.0f;
             char buf[96];
-            snprintf(buf, sizeof(buf), "%.2f  --  0.00 = original, 1.00 = full strength", g_intensity);
+            snprintf(buf, sizeof(buf), "%.2f  --  0.00 = original, 2.00 = strongest", g_intensity);
             SetWindowTextA(g_lblIntensity, buf);
         }
         return 0;
