@@ -62,13 +62,13 @@ Say "  dlss5-neural.addon64        -- the neural upscaling add-on"
 Say "  dlssnr_amd_pass1.dll        -- pass-1 runtime"
 Say "  dlssnr_on_amd_weights.bin   -- model weights (the big one, ~148 MB)"
 Say "  dlssnr_on_amd.ini, ReShade.ini -- config"
-Say "  from: https://www.mediafire.com/file/c1amllc1rux130g/AMD-DLSS5-Image-Converter.zip/file"
+Say "  from: https://www.mediafire.com/file/pw9ap24mfq89hyq/DLSS5.zip/file"
 
 Rule 'Output'
 $installOk = $false
 try {
     Say "Locating the download link on MediaFire..."
-    $page = Invoke-WebRequest -Uri 'https://www.mediafire.com/file/c1amllc1rux130g/AMD-DLSS5-Image-Converter.zip/file' `
+    $page = Invoke-WebRequest -Uri 'https://www.mediafire.com/file/pw9ap24mfq89hyq/DLSS5.zip/file' `
                                -UseBasicParsing -Headers @{ 'User-Agent' = 'Mozilla/5.0' }
     $m = [regex]::Match($page.Content, 'https://download\d+\.mediafire\.com/\S+?\.zip')
     if (-not $m.Success) {
