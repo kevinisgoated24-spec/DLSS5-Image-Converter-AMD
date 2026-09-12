@@ -515,9 +515,15 @@ bool SetupGpu(Gpu& gpu, UINT w, UINT h) {
     wc.hInstance = GetModuleHandle(nullptr);
     wc.lpszClassName = "Dlss5ConverterProcessingWindow";
     RegisterClassA(&wc);
+    // Positioned off-screen rather than minimized: dlss5-neural.addon64 v0.4.2 added a real
+    // IsIconic() check that sits frames out while the window it's hooked into is minimized (a
+    // legitimate optimization for real games), and this window being minimized on purpose to
+    // stay out of the user's way meant every frame got skipped -- the add-on ran, just never
+    // did anything, so output looked identical to input. A normal (non-minimized) window placed
+    // far off-screen is just as invisible to the user without tripping that check.
     HWND hwnd = CreateWindowA("Dlss5ConverterProcessingWindow", "DLSS5 Converter -- processing",
-                              WS_OVERLAPPEDWINDOW, 100, 100, (int)w, (int)h, nullptr, nullptr, wc.hInstance, nullptr);
-    ShowWindow(hwnd, SW_SHOWMINIMIZED);
+                              WS_OVERLAPPEDWINDOW, -32000, -32000, (int)w, (int)h, nullptr, nullptr, wc.hInstance, nullptr);
+    ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
     SetActiveWindow(hwnd);
