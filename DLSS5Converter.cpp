@@ -665,8 +665,12 @@ bool ProcessVideo(const std::string& inputPath, const std::string& outputPath, f
     printf("%s: extracting frames\n", kName);
     // -pix_fmt bgr24: see the comment on ConvertToBmp -- without it a source with an alpha
     // channel gets written as a 32-bit BMP, which LoadBmpAsRgba rejects.
+    // -fps_mode passthrough is the modern, non-deprecated spelling of the old "-vsync 0": every
+    // decoded frame is written out as-is, none dropped or duplicated, regardless of the source's
+    // frame rate -- so this has no effect on the eventual output frame rate, which is driven
+    // separately by -framerate on the re-encode below.
     std::string extractCmd = "ffmpeg -y -loglevel error -i \"" + inputPath + "\" -pix_fmt bgr24 "
-                              "-vsync 0 \"" + frameDir + "\\frame_%06d.bmp\"";
+                              "-fps_mode passthrough \"" + frameDir + "\\frame_%06d.bmp\"";
     if (RunCommand(extractCmd) != 0) { printf("%s: ffmpeg failed to extract frames\n", kName); return false; }
 
     std::string audioPath = stem + "_audio.m4a";
