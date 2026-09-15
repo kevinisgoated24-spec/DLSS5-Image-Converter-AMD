@@ -70,7 +70,7 @@ try {
     # confirm=t is Google Drive's standard bypass for the "can't scan this file for viruses"
     # interstitial it puts in front of anything over 100 MB -- without it, this URL serves that
     # warning page's HTML instead of the zip. Verified stable without a session-tied uuid/cookie.
-    $driveUrl = 'https://drive.usercontent.google.com/download?id=1Ikex9j3I1s_NSxh5YTGZnVDC_mXU4Mzd&export=download&confirm=t'
+    $driveUrl = 'https://drive.usercontent.google.com/download?id=1xHqU0K56STvizAhZpSsED1t16D8h8TO-&export=download&confirm=t'
     Say "Downloading dependency package (about 105 MB)..."
     Invoke-WebRequest -Uri $driveUrl -OutFile 'dlss5convert_deps.zip' -Headers @{ 'User-Agent' = 'Mozilla/5.0' }
 
